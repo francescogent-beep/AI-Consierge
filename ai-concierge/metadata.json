@@ -1,0 +1,5 @@
+{
+  "name": "AI Concierge",
+  "description": "A unified workspace to organize and manage conversations across multiple AI assistants like ChatGPT, Claude, and Gemini.",
+  "requestFramePermissions": []
+}

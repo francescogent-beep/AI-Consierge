@@ -1,0 +1,913 @@
+import * as React from 'react';
+import { useState, useMemo, useEffect, Component, ReactNode } from 'react';
+import { 
+  Search, 
+  Plus, 
+  MessageSquare, 
+  Bookmark, 
+  Settings, 
+  Filter, 
+  MoreVertical, 
+  Send,
+  ChevronRight,
+  LayoutGrid,
+  Zap,
+  Cpu,
+  Globe,
+  Star,
+  Trash2,
+  Menu,
+  X,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  Copy
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { GoogleGenAI } from "@google/genai";
+import { 
+  onAuthStateChanged, 
+  User 
+} from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  onSnapshot, 
+  addDoc, 
+  setDoc, 
+  doc, 
+  deleteDoc, 
+  orderBy, 
+  serverTimestamp,
+  Timestamp
+} from 'firebase/firestore';
+import { 
+  auth, 
+  db, 
+  loginWithGoogle, 
+  logout, 
+  handleFirestoreError, 
+  OperationType 
+} from './firebase';
+import { MOCK_CHATS } from './constants';
+import { Chat, AIProvider, Message } from './types';
+
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  errorInfo: string | null;
+}
+
+class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  public state: ErrorBoundaryState;
+  public props: ErrorBoundaryProps;
+
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, errorInfo: null };
+  }
+
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, errorInfo: error.message };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      let displayMessage = "Something went wrong.";
+      try {
+        const parsed = JSON.parse(this.state.errorInfo || '{}');
+        if (parsed.error) displayMessage = `Permission Error: ${parsed.error}`;
+      } catch {
+        displayMessage = this.state.errorInfo || displayMessage;
+      }
+
+      return (
+        <div className="flex flex-col items-center justify-center h-screen bg-red-50 p-8 text-center">
+          <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
+          <h2 className="text-xl font-bold text-red-800 mb-2">Application Error</h2>
+          <p className="text-red-600 mb-6 max-w-md">{displayMessage}</p>
+          <button 
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-red-600 text-white rounded-xl font-bold hover:bg-red-700 transition-all"
+          >
+            Reload Application
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const PROVIDER_ICONS: Record<AIProvider, React.ReactNode> = {
+  ChatGPT: <Zap className="w-4 h-4 text-emerald-500" />,
+  Claude: <Cpu className="w-4 h-4 text-orange-500" />,
+  Gemini: <Star className="w-4 h-4 text-blue-500" />,
+  Perplexity: <Globe className="w-4 h-4 text-cyan-500" />,
+};
+
+const PROVIDER_COLORS: Record<AIProvider, string> = {
+  ChatGPT: 'bg-emerald-50 text-emerald-700 border-emerald-100',
+  Claude: 'bg-orange-50 text-orange-700 border-orange-100',
+  Gemini: 'bg-blue-50 text-blue-700 border-blue-100',
+  Perplexity: 'bg-cyan-50 text-cyan-700 border-cyan-100',
+};
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeFilter, setActiveFilter] = useState<AIProvider | 'All'>('All');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [newMessage, setNewMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [connectingProvider, setConnectingProvider] = useState<AIProvider | null>(null);
+
+  const [isNewChatModalOpen, setIsNewChatModalOpen] = useState(false);
+  const [newChatTitle, setNewChatTitle] = useState('');
+  const [newChatProvider, setNewChatProvider] = useState<AIProvider>('ChatGPT');
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [connectedProviders, setConnectedProviders] = useState<Record<AIProvider, boolean>>({
+    ChatGPT: true,
+    Claude: false,
+    Gemini: false,
+    Perplexity: false
+  });
+  const [apiKeys, setApiKeys] = useState({
+    ChatGPT: '',
+    Claude: '',
+    Gemini: '',
+    Perplexity: ''
+  });
+
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Firestore Sync
+  useEffect(() => {
+    if (!isAuthReady || !user) {
+      setChats([]);
+      return;
+    }
+
+    const q = query(
+      collection(db, 'chats'),
+      where('userId', '==', user.uid),
+      orderBy('timestamp', 'desc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const chatList: Chat[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        chatList.push({
+          ...data,
+          id: doc.id,
+          timestamp: data.timestamp?.toDate?.()?.toISOString() || new Date().toISOString(),
+          messages: [] // Messages fetched separately when selected
+        } as Chat);
+      });
+      setChats(chatList);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, 'chats');
+    });
+
+    return () => unsubscribe();
+  }, [isAuthReady, user]);
+
+  // Fetch messages for selected chat
+  useEffect(() => {
+    if (!selectedChatId || !user) return;
+
+    const q = query(
+      collection(db, 'chats', selectedChatId, 'messages'),
+      orderBy('timestamp', 'asc')
+    );
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const msgs: Message[] = [];
+      snapshot.forEach((doc) => {
+        const data = doc.data();
+        msgs.push({
+          ...data,
+          id: doc.id,
+          timestamp: data.timestamp?.toDate?.()?.toISOString() || new Date().toISOString()
+        } as Message);
+      });
+
+      setChats(prev => prev.map(c => c.id === selectedChatId ? { ...c, messages: msgs } : c));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.LIST, `chats/${selectedChatId}/messages`);
+    });
+
+    return () => unsubscribe();
+  }, [selectedChatId, user]);
+
+  const handleCreateChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChatTitle.trim() || !user) return;
+
+    try {
+      const chatId = Math.random().toString(36).substr(2, 9);
+      const chatData = {
+        userId: user.uid,
+        title: newChatTitle,
+        provider: newChatProvider,
+        lastMessage: 'New conversation started',
+        timestamp: serverTimestamp(),
+        isBookmarked: false
+      };
+
+      await setDoc(doc(db, 'chats', chatId), chatData);
+      setSelectedChatId(chatId);
+      setIsNewChatModalOpen(false);
+      setNewChatTitle('');
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'chats');
+    }
+  };
+
+  const filteredChats = useMemo(() => {
+    return chats.filter(chat => {
+      const matchesSearch = chat.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                           chat.lastMessage.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesFilter = activeFilter === 'All' || chat.provider === activeFilter;
+      return matchesSearch && matchesFilter;
+    }).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [chats, searchQuery, activeFilter]);
+
+  const selectedChat = useMemo(() => 
+    chats.find(c => c.id === selectedChatId), 
+    [chats, selectedChatId]
+  );
+
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMessage.trim() || !selectedChatId || isTyping || !user) return;
+
+    const userMsg = newMessage;
+    setNewMessage('');
+    setIsTyping(true);
+
+    try {
+      // 1. Save user message to Firestore
+      const userMsgId = Math.random().toString(36).substr(2, 9);
+      await addDoc(collection(db, 'chats', selectedChatId, 'messages'), {
+        id: userMsgId,
+        chatId: selectedChatId,
+        role: 'user',
+        content: userMsg,
+        timestamp: serverTimestamp()
+      });
+
+      // Update chat last message
+      await setDoc(doc(db, 'chats', selectedChatId), {
+        lastMessage: userMsg,
+        timestamp: serverTimestamp()
+      }, { merge: true });
+
+      let aiResponse = "";
+      const currentChat = chats.find(c => c.id === selectedChatId);
+      
+      if (!currentChat) return;
+
+      if (currentChat.provider === 'Gemini') {
+        const apiKey = apiKeys.Gemini || process.env.GEMINI_API_KEY;
+        if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+          aiResponse = "Please provide a valid Gemini API Key in Settings to enable real responses.";
+        } else {
+          try {
+            const genAI = new GoogleGenAI({ apiKey });
+            const history = currentChat.messages.slice(-5).map(m => ({
+              role: m.role === 'user' ? 'user' : 'model',
+              parts: [{ text: m.content }]
+            }));
+
+            const response = await genAI.models.generateContent({
+              model: "gemini-3-flash-preview",
+              contents: history.length > 0 ? history : [{ role: 'user', parts: [{ text: userMsg }] }]
+            });
+            aiResponse = response.text || "I'm sorry, I couldn't generate a response.";
+          } catch (err: any) {
+            console.error("Gemini Error:", err);
+            aiResponse = `Error from Gemini: ${err.message || "Unknown error"}. Please check your API key.`;
+          }
+        }
+      } else {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        aiResponse = `[Simulated ${currentChat.provider} Response]: I've received your message: "${userMsg}". In a production environment with a valid ${currentChat.provider} API key or session, I would provide a real response here.`;
+      }
+
+      // 2. Save AI response to Firestore
+      const aiMsgId = Math.random().toString(36).substr(2, 9);
+      await addDoc(collection(db, 'chats', selectedChatId, 'messages'), {
+        id: aiMsgId,
+        chatId: selectedChatId,
+        role: 'assistant',
+        content: aiResponse,
+        timestamp: serverTimestamp()
+      });
+
+      await setDoc(doc(db, 'chats', selectedChatId), {
+        lastMessage: aiResponse,
+        timestamp: serverTimestamp()
+      }, { merge: true });
+
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `chats/${selectedChatId}`);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  const toggleBookmark = async (id: string) => {
+    const chat = chats.find(c => c.id === id);
+    if (!chat) return;
+    try {
+      await setDoc(doc(db, 'chats', id), { isBookmarked: !chat.isBookmarked }, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `chats/${id}`);
+    }
+  };
+
+  const deleteChat = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'chats', id));
+      if (selectedChatId === id) setSelectedChatId(null);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `chats/${id}`);
+    }
+  };
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      // Validate origin
+      if (!event.origin.endsWith('.run.app') && !event.origin.includes('localhost')) {
+        return;
+      }
+      
+      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        // In a real app, you'd refresh the session or fetch user data
+        // For this demo, we'll just mark the provider as connected
+        if (connectingProvider) {
+          setConnectedProviders(prev => ({ ...prev, [connectingProvider]: true }));
+          setConnectingProvider(null);
+        }
+      }
+    };
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
+  }, [connectingProvider]);
+
+  const handleConnectProvider = async (p: AIProvider) => {
+    if (connectedProviders[p]) {
+      setConnectedProviders({ ...connectedProviders, [p]: false });
+      return;
+    }
+
+    setConnectingProvider(p);
+    
+    try {
+      const response = await fetch(`/api/auth/url?provider=${p}`);
+      if (!response.ok) throw new Error('Failed to get auth URL');
+      const { url } = await response.json();
+
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+
+      window.open(
+        url,
+        `auth_${p}`,
+        `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,location=no,status=no`
+      );
+    } catch (error) {
+      console.error("Auth error:", error);
+      setConnectingProvider(null);
+      alert("Failed to initiate login. Please try again.");
+    }
+  };
+
+  if (!isAuthReady) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center bg-[#F8F9FA]">
+        <Loader2 className="w-8 h-8 text-indigo-600 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-[#F8F9FA] p-4">
+        <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center mb-6 shadow-xl shadow-indigo-200">
+          <MessageSquare className="w-8 h-8 text-white" />
+        </div>
+        <h1 className="text-2xl font-bold text-slate-800 mb-2">Welcome to AI Organizer</h1>
+        <p className="text-slate-500 mb-8 text-center max-w-sm">
+          Your unified workspace for all AI conversations. Sign in to start organizing.
+        </p>
+        <button 
+          onClick={loginWithGoogle}
+          className="flex items-center gap-3 px-8 py-3 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all shadow-sm"
+        >
+          <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
+          Sign in with Google
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <ErrorBoundary>
+      <div className="flex h-screen bg-[#F8F9FA] text-slate-900 font-sans overflow-hidden">
+      {/* Sidebar */}
+      <motion.aside 
+        initial={false}
+        animate={{ width: isSidebarOpen ? 320 : 0, opacity: isSidebarOpen ? 1 : 0 }}
+        className="bg-white border-r border-slate-200 flex flex-col h-full relative z-20"
+      >
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
+              <MessageSquare className="w-5 h-5 text-white" />
+            </div>
+            <h1 className="font-bold text-lg tracking-tight">AI Organizer</h1>
+          </div>
+          <button 
+            onClick={() => setIsSidebarOpen(false)}
+            className="p-1.5 hover:bg-slate-100 rounded-md lg:hidden"
+          >
+            <X className="w-5 h-5 text-slate-500" />
+          </button>
+        </div>
+
+        {/* Search & Filter */}
+        <div className="p-4 space-y-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <input 
+              type="text"
+              placeholder="Search conversations..."
+              className="w-full pl-10 pr-4 py-2 bg-slate-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+          
+          <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
+            {['All', 'ChatGPT', 'Claude', 'Gemini', 'Perplexity'].map((filter) => (
+              <button
+                key={filter}
+                onClick={() => setActiveFilter(filter as any)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all flex items-center gap-1.5 ${
+                  activeFilter === filter 
+                    ? 'bg-indigo-600 text-white shadow-sm' 
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {filter !== 'All' && (
+                  <div className={`w-1.5 h-1.5 rounded-full ${connectedProviders[filter as AIProvider] ? 'bg-emerald-400' : 'bg-slate-300'}`} />
+                )}
+                {filter}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Chat List */}
+        <div className="flex-1 overflow-y-auto px-2 space-y-1">
+          {filteredChats.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-slate-400">
+              <Search className="w-8 h-8 mb-2 opacity-20" />
+              <p className="text-sm">No chats found</p>
+            </div>
+          ) : (
+            filteredChats.map((chat) => (
+              <button
+                key={chat.id}
+                onClick={() => setSelectedChatId(chat.id)}
+                className={`w-full text-left p-3 rounded-xl transition-all group relative ${
+                  selectedChatId === chat.id 
+                    ? 'bg-indigo-50 border-indigo-100' 
+                    : 'hover:bg-slate-50 border-transparent'
+                } border`}
+              >
+                <div className="flex items-start justify-between mb-1">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    {PROVIDER_ICONS[chat.provider]}
+                    <span className="font-semibold text-sm truncate">{chat.title}</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 whitespace-nowrap ml-2">
+                    {new Date(chat.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 line-clamp-1 pr-4">
+                  {chat.lastMessage}
+                </p>
+                {chat.isBookmarked && (
+                  <Bookmark className="absolute right-2 bottom-3 w-3 h-3 text-indigo-400 fill-indigo-400" />
+                )}
+              </button>
+            ))
+          )}
+        </div>
+
+        {/* Sidebar Footer */}
+        <div className="p-4 border-t border-slate-100">
+          <button 
+            onClick={() => setIsNewChatModalOpen(true)}
+            className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold text-sm transition-all shadow-md shadow-indigo-200"
+          >
+            <Plus className="w-4 h-4" />
+            New Conversation
+          </button>
+        </div>
+      </motion.aside>
+
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col min-w-0 relative">
+        {/* Header */}
+        <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 lg:px-8 shrink-0">
+          <div className="flex items-center gap-4">
+            {!isSidebarOpen && (
+              <button 
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <Menu className="w-5 h-5 text-slate-600" />
+              </button>
+            )}
+            {selectedChat && (
+              <div className="flex items-center gap-3">
+                <div className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider border ${PROVIDER_COLORS[selectedChat.provider]}`}>
+                  {selectedChat.provider}
+                </div>
+                <h2 className="font-bold text-slate-800 truncate max-w-[200px] sm:max-w-md">
+                  {selectedChat.title}
+                </h2>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {selectedChat && (
+              <>
+                <button 
+                  onClick={() => toggleBookmark(selectedChat.id)}
+                  className={`p-2 rounded-lg transition-colors ${selectedChat.isBookmarked ? 'bg-indigo-50 text-indigo-600' : 'hover:bg-slate-100 text-slate-500'}`}
+                >
+                  <Bookmark className={`w-5 h-5 ${selectedChat.isBookmarked ? 'fill-current' : ''}`} />
+                </button>
+                <button 
+                  onClick={() => deleteChat(selectedChat.id)}
+                  className="p-2 hover:bg-red-50 text-slate-500 hover:text-red-600 rounded-lg transition-colors"
+                >
+                  <Trash2 className="w-5 h-5" />
+                </button>
+              </>
+            )}
+            <div className="w-px h-6 bg-slate-200 mx-2" />
+            <button 
+              onClick={() => setIsSettingsOpen(true)}
+              className="p-2 hover:bg-slate-100 text-slate-500 rounded-lg transition-colors"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+            <div className="w-8 h-8 rounded-full bg-indigo-100 border border-indigo-200 flex items-center justify-center text-indigo-700 font-bold text-xs overflow-hidden">
+              {user.photoURL ? (
+                <img src={user.photoURL} alt={user.displayName || ''} className="w-full h-full object-cover" />
+              ) : (
+                user.displayName?.charAt(0) || 'U'
+              )}
+            </div>
+            <button 
+              onClick={logout}
+              className="p-2 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded-lg transition-colors"
+              title="Sign Out"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </header>
+
+        {/* Chat View */}
+        <div className="flex-1 overflow-y-auto p-4 lg:p-8 space-y-6 bg-[#F8F9FA]">
+          {selectedChat ? (
+            <>
+              <AnimatePresence mode="popLayout">
+                {selectedChat.messages.map((msg, idx) => (
+                  <motion.div
+                    key={msg.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: idx * 0.05 }}
+                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[85%] sm:max-w-[70%] rounded-2xl p-4 shadow-sm ${
+                      msg.role === 'user' 
+                        ? 'bg-indigo-600 text-white rounded-tr-none' 
+                        : 'bg-white border border-slate-200 rounded-tl-none'
+                    }`}>
+                      <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                      <div className={`mt-2 text-[10px] ${msg.role === 'user' ? 'text-indigo-200' : 'text-slate-400'}`}>
+                        {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    </div>
+                  </motion.div>
+                ))}
+                {isTyping && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="flex justify-start"
+                  >
+                    <div className="bg-white border border-slate-200 rounded-2xl rounded-tl-none p-4 shadow-sm flex items-center gap-2">
+                      <div className="flex gap-1">
+                        <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 0.6 }} className="w-1.5 h-1.5 bg-indigo-400 rounded-full" />
+                        <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0.2 }} className="w-1.5 h-1.5 bg-indigo-400 rounded-full" />
+                        <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0.4 }} className="w-1.5 h-1.5 bg-indigo-400 rounded-full" />
+                      </div>
+                      <span className="text-xs text-slate-400 italic">Thinking...</span>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              <div className="h-20" /> {/* Spacer for input */}
+            </>
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400">
+              <div className="w-16 h-16 bg-white rounded-2xl shadow-sm border border-slate-200 flex items-center justify-center mb-4">
+                <MessageSquare className="w-8 h-8 text-indigo-600" />
+              </div>
+              <h3 className="font-bold text-slate-800 mb-1">Select a conversation</h3>
+              <p className="text-sm">Choose a chat from the sidebar to start organizing</p>
+            </div>
+          )}
+        </div>
+
+        {/* Input Area */}
+        {selectedChat && (
+          <div className="absolute bottom-0 left-0 right-0 p-4 lg:p-8 bg-gradient-to-t from-[#F8F9FA] via-[#F8F9FA] to-transparent">
+            <form 
+              onSubmit={handleSendMessage}
+              className="max-w-4xl mx-auto bg-white border border-slate-200 rounded-2xl shadow-lg flex items-center p-2 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all"
+            >
+              <button type="button" className="p-2 hover:bg-slate-100 rounded-xl text-slate-400 transition-colors">
+                <Plus className="w-5 h-5" />
+              </button>
+              <input 
+                type="text"
+                placeholder={`Message ${selectedChat.provider}...`}
+                className="flex-1 bg-transparent border-none outline-none px-4 text-sm"
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+              />
+              <button 
+                type="submit"
+                disabled={!newMessage.trim()}
+                className="p-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white rounded-xl transition-all shadow-sm"
+              >
+                <Send className="w-4 h-4" />
+              </button>
+            </form>
+          </div>
+        )}
+      </main>
+
+      {/* Mobile Overlay */}
+      {isSidebarOpen && (
+        <div 
+          className="fixed inset-0 bg-black/20 backdrop-blur-sm z-10 lg:hidden"
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
+      {/* New Chat Modal */}
+      <AnimatePresence>
+        {isNewChatModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-bold text-xl">New Conversation</h3>
+                <button 
+                  onClick={() => setIsNewChatModalOpen(false)}
+                  className="p-1 hover:bg-slate-100 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <form onSubmit={handleCreateChat} className="p-6 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Conversation Title
+                  </label>
+                  <input 
+                    autoFocus
+                    type="text"
+                    placeholder="e.g. Project Brainstorming"
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none transition-all"
+                    value={newChatTitle}
+                    onChange={(e) => setNewChatTitle(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Select AI Provider
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['ChatGPT', 'Claude', 'Gemini', 'Perplexity'] as AIProvider[]).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => setNewChatProvider(p)}
+                        className={`flex items-center gap-2 p-3 rounded-xl border text-sm transition-all ${
+                          newChatProvider === p 
+                            ? 'bg-indigo-50 border-indigo-200 text-indigo-700 ring-2 ring-indigo-500/10' 
+                            : 'bg-white border-slate-200 text-slate-600 hover:border-indigo-200'
+                        }`}
+                      >
+                        {PROVIDER_ICONS[p]}
+                        <span className="font-medium">{p}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="pt-2">
+                  <button 
+                    type="submit"
+                    disabled={!newChatTitle.trim()}
+                    className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 text-white rounded-xl font-bold transition-all shadow-lg shadow-indigo-200"
+                  >
+                    Start Chatting
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Settings className="w-5 h-5 text-indigo-600" />
+                  <h3 className="font-bold text-xl">Settings & Integrations</h3>
+                </div>
+                <button 
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="p-1 hover:bg-slate-100 rounded-lg"
+                >
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              <div className="p-6 space-y-6">
+                <div className="p-4 bg-indigo-50 rounded-xl border border-indigo-100">
+                  <h4 className="text-sm font-bold text-indigo-900 mb-1">OAuth Configuration</h4>
+                  <p className="text-[11px] text-indigo-700 mb-3">
+                    Add this Redirect URI to your provider's dashboard (OpenAI, Anthropic, etc.) to enable real logins.
+                  </p>
+                  <div className="flex items-center gap-2 bg-white p-2 rounded-lg border border-indigo-200">
+                    <code className="text-[9px] flex-1 break-all font-mono text-slate-600">
+                      {window.location.origin}/auth/callback
+                    </code>
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(`${window.location.origin}/auth/callback`);
+                        alert("Copied to clipboard!");
+                      }}
+                      className="p-1.5 hover:bg-indigo-50 rounded-md text-indigo-600 transition-colors"
+                      title="Copy to clipboard"
+                    >
+                      <Copy size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800 mb-4">Platform Connections</h4>
+                  <p className="text-xs text-slate-500 mb-4">
+                    Connect your AI accounts to sync conversations and data.
+                  </p>
+                  <div className="space-y-3">
+                    {(['ChatGPT', 'Claude', 'Gemini', 'Perplexity'] as AIProvider[]).map((p) => (
+                      <div key={p} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2 bg-white rounded-lg shadow-sm">
+                            {PROVIDER_ICONS[p]}
+                          </div>
+                          <div>
+                            <div className="text-sm font-bold text-slate-800">{p}</div>
+                            <div className="flex items-center gap-1">
+                              <div className={`w-1.5 h-1.5 rounded-full ${connectedProviders[p] ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">
+                                {connectedProviders[p] ? 'Connected' : 'Not Linked'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        <button 
+                          onClick={() => handleConnectProvider(p)}
+                          disabled={connectingProvider === p}
+                          className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${
+                            connectedProviders[p] 
+                              ? 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100' 
+                              : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                          }`}
+                        >
+                          {connectingProvider === p ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Connecting...
+                            </>
+                          ) : (
+                            connectedProviders[p] ? 'Disconnect' : 'Log In'
+                          )}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-sm font-bold text-slate-800 mb-4">Advanced: API Keys</h4>
+                  <div className="space-y-3">
+                    {(['ChatGPT', 'Claude', 'Gemini', 'Perplexity'] as AIProvider[]).map((p) => (
+                      <div key={p} className="flex items-center gap-4">
+                        <div className="w-24 shrink-0 flex items-center gap-2">
+                          {PROVIDER_ICONS[p]}
+                          <span className="text-xs font-semibold">{p}</span>
+                        </div>
+                        <div className="flex-1 relative">
+                          <input 
+                            type="password"
+                            placeholder={`Enter ${p} API Key`}
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-[10px] focus:ring-2 focus:ring-indigo-500/20 outline-none pr-16"
+                            value={apiKeys[p]}
+                            onChange={(e) => setApiKeys({ ...apiKeys, [p]: e.target.value })}
+                          />
+                          {apiKeys[p] && (
+                            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded text-[8px] font-bold">
+                              <CheckCircle2 className="w-2 h-2" />
+                              Linked
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                
+                <div className="bg-indigo-50 p-4 rounded-xl border border-indigo-100">
+                  <h4 className="text-xs font-bold text-indigo-800 mb-1 flex items-center gap-1">
+                    <Zap className="w-3 h-3" /> How it works
+                  </h4>
+                  <p className="text-[11px] text-indigo-700 leading-relaxed">
+                    Once keys are provided, AI Concierge uses official SDKs to fetch your conversation history and send new messages directly to the AI providers. Your data never touches our servers.
+                  </p>
+                </div>
+              </div>
+              <div className="p-6 bg-slate-50 border-t border-slate-100 flex justify-end">
+                <button 
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="px-6 py-2 bg-indigo-600 text-white rounded-xl font-bold text-sm hover:bg-indigo-700 transition-all"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+      </div>
+    </ErrorBoundary>
+  );
+}
