@@ -103,8 +103,14 @@ async function startServer() {
 
   // Mock OAuth URL endpoint
   app.get("/api/auth/url", (req, res) => {
-    const { provider } = req.query;
-    const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+    const { provider, origin } = req.query;
+    
+    // Use origin from client, then APP_URL, then dynamic detection
+    let baseUrl = (origin as string) || process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+    
+    // Remove trailing slash if present
+    baseUrl = baseUrl.replace(/\/$/, "");
+    
     const redirectUri = `${baseUrl}/auth/callback`;
     
     // For the demo, we'll use a local mock auth page instead of real providers
