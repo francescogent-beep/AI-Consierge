@@ -16,6 +16,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  app.set('trust proxy', true);
   app.use(express.json());
 
   // API routes
@@ -103,11 +104,12 @@ async function startServer() {
   // Mock OAuth URL endpoint
   app.get("/api/auth/url", (req, res) => {
     const { provider } = req.query;
-    const redirectUri = `${process.env.APP_URL || 'http://localhost:3000'}/auth/callback`;
+    const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+    const redirectUri = `${baseUrl}/auth/callback`;
     
     // For the demo, we'll use a local mock auth page instead of real providers
     // to avoid "invalid client_id" errors.
-    const authUrl = `${process.env.APP_URL || 'http://localhost:3000'}/api/mock-auth?provider=${provider}&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    const authUrl = `${baseUrl}/api/mock-auth?provider=${provider}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
     res.json({ url: authUrl });
   });
